@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"bytes"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -33,6 +34,24 @@ type ListTagsResponse struct {
 type harborTag struct {
 	Name    string `json:"name"`
 	Created string `json:"created"`
+}
+
+type riderTag struct {
+	Branch          string `json:"branch"`
+	BuildTaskID     int64  `json:"build_task_id"`
+	BuildTime       string `json:"build_time"`
+	CommitID        string `json:"commit_id"`
+	CommitMessage   string `json:"commit_message"`
+	DockerImageName string `json:"docker_image_name"`
+
+	RetagDockerImageName *string `json:"retag_docker_image_name"`
+}
+
+type riderTagListResponse struct {
+	Data        []riderTag `json:"data"`
+	Result      bool       `json:"result"`
+	TotalPages  int64      `json:"totalPages"`
+	TotalCounts int64      `json:"total_counts"`
 }
 
 // NewClient creates a new registry client
@@ -165,9 +184,62 @@ func (c *Client) harborListTags(catalog string) (*ListTagsResponse, error) {
 	return v, nil
 }
 
+func (c *Client) riderListTags(catalog string) (*ListTagsResponse, error) {
+	url := fmt.Sprintf("%s/api/pkg/search_app_release", c.endpoint)
+	query := make(map[string]interface{})
+	query["tree_path"] = "bilibili." + catalog
+	queryBuf, err := json.Marshal(query)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewBuffer(queryBuf))
+	if err != nil {
+		return nil, err
+	}
+	client.InitHTTPRequest(req, false)
+	req.Header.Set("Content-Type", "application/json")
+	if c.password != "" {
+		req.Header.Set("rider-token", c.password)
+	}
+	res, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	body, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		return nil, err
+	}
+	var resp riderTagListResponse
+	err = json.Unmarshal(body, &resp)
+	if err != nil {
+		return nil, err
+	}
+	v := &ListTagsResponse{
+		Name: catalog,
+		Tags: make([]string, 0, len(resp.Data)),
+	}
+	if len(resp.Data) > 0 {
+		for _, tag := range resp.Data {
+			imageName := tag.DockerImageName
+			if tag.RetagDockerImageName != nil && *tag.RetagDockerImageName != "" {
+				imageName = *tag.RetagDockerImageName
+			}
+			pos := strings.LastIndex(imageName, ":")
+			if pos < 0 {
+				continue
+			}
+			v.Tags = append(v.Tags, imageName[pos+1:])
+		}
+	}
+	return v, nil
+}
+
 // ListTags list tags for catalog
 func (c *Client) ListTags(catalog string) (*ListTagsResponse, error) {
-	if c.service == "harbor" {
+	if c.service == "rider" {
+		return c.riderListTags(catalog)
+	} else if c.service == "harbor" {
 		return c.harborListTags(catalog)
 	}
 	// defaults to registry
